@@ -1,6 +1,6 @@
 import os
 import requests
-import cloudscraper # 新增：破盾神器
+import cloudscraper
 from datetime import datetime
 import time
 import json
@@ -16,12 +16,12 @@ AI_API_KEY = os.environ.get("AI_API_KEY")
 AI_API_URL = "https://api.bltcy.ai/v1/chat/completions"
 
 # ==========================================
-# 2. 数据获取层 (Reddit RSS + KYM Cloudscraper)
+# 2. 数据获取层 
 # ==========================================
 def fetch_reddit_posts(subreddit, time_filter, limit):
-    """获取 Reddit 热帖"""
+    """获取 Reddit 热帖并提取图片和正文"""
     url = f"https://www.reddit.com/r/{subreddit}/top.rss?t={time_filter}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/2.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/3.0'}
 
     try:
         response = requests.get(url, headers=headers)
@@ -51,7 +51,6 @@ def fetch_reddit_posts(subreddit, time_filter, limit):
             
             result_list.append({
                 'title': title,
-                'score': '🔥榜单前列',
                 'url': img_url,
                 'permalink': link,
                 'body': post_body
@@ -62,23 +61,13 @@ def fetch_reddit_posts(subreddit, time_filter, limit):
         return []
 
 def fetch_kym_news(limit):
-    """使用 cloudscraper 穿透防线获取 Know Your Meme 最新梗资讯"""
+    """获取 Know Your Meme 最新梗资讯"""
     url = "https://knowyourmeme.com/news.rss"
-    
-    # 实例化破盾器，模拟真实桌面端 Chrome
-    scraper = cloudscraper.create_scraper(
-        browser={
-            'browser': 'chrome',
-            'platform': 'windows',
-            'desktop': True
-        }
-    )
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
 
     try:
         response = scraper.get(url)
         response.raise_for_status()
-        
-        # KYM 使用的是标准 RSS 2.0 格式，和 Reddit 的 Atom 格式略有不同
         root = ET.fromstring(response.content)
         items = root.findall('.//item')
         
@@ -92,36 +81,32 @@ def fetch_kym_news(limit):
             post_body = ""
             
             if description:
-                # 提取 KYM 文章中的封面图 (通常在 src 属性中)
                 img_match = re.search(r'src="(https://i\.kym-cdn\.com/[^"]+)"', description)
                 if img_match:
                     img_url = img_match.group(1)
                 
-                # 清洗 HTML 获取纯文本简述
                 clean_text = re.sub(r'<[^>]+>', ' ', html.unescape(description))
                 clean_text = re.sub(r'\s+', ' ', clean_text).strip()
                 post_body = clean_text[:500]
                 
             result_list.append({
                 'title': title,
-                'score': '📰 最新趋势', 
                 'url': img_url,
                 'permalink': link,
                 'body': post_body
             })
-            
         return result_list
     except Exception as e:
         print(f"抓取 Know Your Meme 失败: {e}")
         return []
 
 # ==========================================
-# 3. AI 业务处理层 (微调了 Prompt，兼容多信息源)
+# 3. AI 业务处理层 (优化输出格式)
 # ==========================================
 def analyze_post_with_ai(title, source_name, body, img_url):
-    """调用大模型，结合图文进行深度解析"""
+    """调用大模型，强制输出无表情符号的结构化纯文本"""
     if not AI_API_KEY:
-         return f"⚠️ 未配置 AI 密钥，原标题: {title}"
+         return "解析：未配置 AI 密钥\n创意：无法生成"
 
     headers = {
         'Accept': 'application/json',
@@ -129,25 +114,23 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         'Content-Type': 'application/json'
     }
 
-    system_prompt = "你是一个资深的海外游戏试玩广告（Playable Ads）策划。你的任务是深入理解海外网络热点（如Reddit热帖、KYM热梗），提取其核心刺激点转化为买量广告创意。"
+    system_prompt = "你是一个资深的海外游戏试玩广告策划。你的任务是解读海外热点，提取刺激点转化为买量创意。"
     
+    # 强制 AI 不使用 Emoji，并固定格式
     text_prompt = f"""
     信息来源: {source_name}
     标题: {title}
     正文/背景信息: {body if body else '无正文'}
     
-    请结合上述背景（如果有梗图，请结合图片内容），严格按照以下两点输出（总字数控制在100字以内）：
-    1. 📝 解析：(一句话解释这个梗/趋势的核心笑点、痛点或心理学原理)
-    2. 💡 创意：(一句话说明如何将其转化为试玩广告前3秒的画面、互动套路或二选一选项)
+    请结合上述背景（如果有图片请结合图片内容），严格按照以下两行格式输出（总字数控制在100字以内，【绝不要】使用任何 Emoji 或特殊表情符号）：
+    解析：(一句话解释这个梗/趋势的核心笑点、痛点或心理学原理)
+    创意：(一句话说明如何将其转化为试玩广告前3秒的画面、互动或二选一选项)
     """
 
     user_content = [{"type": "text", "text": text_prompt}]
     
     if img_url:
-        user_content.append({
-            "type": "image_url",
-            "image_url": {"url": img_url}
-        })
+        user_content.append({"type": "image_url", "image_url": {"url": img_url}})
 
     payload = json.dumps({
         "model": "gemini-3.1-flash-lite-preview", 
@@ -156,7 +139,7 @@ def analyze_post_with_ai(title, source_name, body, img_url):
             {"role": "user", "content": user_content}
         ],
         "temperature": 0.7,
-        "max_tokens": 200
+        "max_tokens": 150
     })
 
     try:
@@ -166,40 +149,83 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         return result['choices'][0]['message']['content'].strip()
     except Exception as e:
         print(f"AI 解析出错: {e}")
-        return f"AI深入解析失败，仅提供标题参考: {title}"
+        return "解析：AI 深入解析失败\n创意：请结合原文直达链接自行查看"
 
 # ==========================================
-# 4. 消息推送层
+# 4. 消息推送层 (全新极简排版逻辑)
 # ==========================================
 def send_to_feishu(report_title, content_blocks):
-    """发送富文本到飞书"""
+    """构建分组分块的清晰飞书排版"""
     if not FEISHU_WEBHOOK_URL:
         print("❌ 未配置飞书 Webhook URL，无法推送。")
         return
 
     feishu_post_content = []
     
-    for block in content_blocks:
-        source = block['source']
-        posts = block['posts']
-        
-        # 区分一下来源的 Emoji 样式
-        icon = "🔥" if "r/" in source else "🧠"
-        feishu_post_content.append([{"tag": "text", "text": f"{icon} 【{source}】", "un_escape": True}])
-        
-        if not posts:
-            feishu_post_content.append([{"tag": "text", "text": "  暂无抓取到有效数据\n"}])
+    # ---------------- 模块一：Know Your Meme ----------------
+    feishu_post_content.append([{"tag": "text", "text": "🌐 【 Know Your Meme | 全网流行趋势 】\n"}])
+    kym_blocks = [b for b in content_blocks if b['type'] == 'kym']
+    
+    for block in kym_blocks:
+        if not block['posts']:
+            feishu_post_content.append([{"tag": "text", "text": "   暂无抓取到有效数据\n\n"}])
             continue
             
-        for index, post in enumerate(posts, start=1):
-            link_line = [{"tag": "text", "text": f"[{index}] {post['score']} | "}]
+        for index, post in enumerate(block['posts'], start=1):
+            # 1. 标题层
+            feishu_post_content.append([{"tag": "text", "text": f"{index}. {post['title']}"}])
+            
+            # 2. 链接层 (缩进对齐)
+            link_line = [{"tag": "text", "text": "   ↳ 链接: "}]
             if post['url']:
                 link_line.append({"tag": "a", "text": "[查看视觉素材]", "href": post['url']})
                 link_line.append({"tag": "text", "text": " | "})
             link_line.append({"tag": "a", "text": "[原文直达]", "href": post['permalink']})
             feishu_post_content.append(link_line)
             
-            feishu_post_content.append([{"tag": "text", "text": f"🤖 {post['ai_analysis']}"}])
+            # 3. AI 解析层 (缩进对齐)
+            ai_lines = post['ai_analysis'].split('\n')
+            for line in ai_lines:
+                clean_line = line.strip()
+                if clean_line:
+                    # 统一使用 ▪ 作为项目符号
+                    clean_line = clean_line.replace("解析：", "解析: ").replace("创意：", "创意: ")
+                    feishu_post_content.append([{"tag": "text", "text": f"   ▪ {clean_line}"}])
+            
+            feishu_post_content.append([{"tag": "text", "text": "\n"}]) # 帖子间的空行
+
+    # ---------------- 模块二：Reddit ----------------
+    feishu_post_content.append([{"tag": "text", "text": "👾 【 Reddit | 垂直圈层热点 】\n"}])
+    reddit_blocks = [b for b in content_blocks if b['type'] == 'reddit']
+    
+    for block in reddit_blocks:
+        # 标明是哪个 Subreddit
+        feishu_post_content.append([{"tag": "text", "text": f"◼ {block['source']}"}])
+        
+        if not block['posts']:
+            feishu_post_content.append([{"tag": "text", "text": "   暂无抓取到有效数据\n\n"}])
+            continue
+            
+        for index, post in enumerate(block['posts'], start=1):
+            # 1. 标题层 (再次缩进)
+            feishu_post_content.append([{"tag": "text", "text": f"   {index}. {post['title']}"}])
+            
+            # 2. 链接层
+            link_line = [{"tag": "text", "text": "      ↳ 链接: "}]
+            if post['url']:
+                link_line.append({"tag": "a", "text": "[查看视觉素材]", "href": post['url']})
+                link_line.append({"tag": "text", "text": " | "})
+            link_line.append({"tag": "a", "text": "[原文直达]", "href": post['permalink']})
+            feishu_post_content.append(link_line)
+            
+            # 3. AI 解析层
+            ai_lines = post['ai_analysis'].split('\n')
+            for line in ai_lines:
+                clean_line = line.strip()
+                if clean_line:
+                    clean_line = clean_line.replace("解析：", "解析: ").replace("创意：", "创意: ")
+                    feishu_post_content.append([{"tag": "text", "text": f"      ▪ {clean_line}"}])
+            
             feishu_post_content.append([{"tag": "text", "text": "\n"}])
 
     payload = {
@@ -209,7 +235,7 @@ def send_to_feishu(report_title, content_blocks):
 
     try:
         requests.post(FEISHU_WEBHOOK_URL, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
-        print("✅ 成功推送到飞书！")
+        print("✅ 成功推送到飞书！排版已优化。")
     except Exception as e:
         print(f"❌ 飞书推送失败: {e}")
 
@@ -225,48 +251,49 @@ def main():
     ]
 
     today_weekday = datetime.today().weekday()
-    
     if today_weekday == 0:
-        report_title = "📊 [周一盘点] 海外热梗与广告创意库 Top 10"
+        report_title = "📊 [周一盘点] 海外热梗与广告创意日报"
         time_filter = 'week'
         fetch_limit = 10
     else:
-        report_title = f"🚀 [日常速递] 海外热梗与广告创意库 Top 3"
+        report_title = "📰 [日常速递] 海外热梗与广告创意日报"
         time_filter = 'day'
         fetch_limit = 3
 
     print(f"🎯 正在生成: {report_title}...\n")
     all_content_blocks = []
 
-    # 1. 抓取 Know Your Meme (新增)
+    # --- 抓取 Know Your Meme ---
     print("正在抓取 Know Your Meme 趋势...")
     kym_posts = fetch_kym_news(fetch_limit)
     for post in kym_posts:
-        print(f"  -> 正在使用 Gemini 解析 KYM: {post['title'][:30]}...") 
+        print(f"  -> 正在解析 KYM: {post['title'][:30]}...") 
         post['ai_analysis'] = analyze_post_with_ai(post['title'], "Know Your Meme", post['body'], post['url'])
     
     all_content_blocks.append({
-        'source': 'Know Your Meme (TikTok/Twitter趋势)',
+        'type': 'kym',  # 标记数据类型，用于后续排版分组
+        'source': 'Know Your Meme',
         'posts': kym_posts
     })
     time.sleep(1.5)
 
-    # 2. 抓取 Reddit 各大板块
+    # --- 抓取 Reddit ---
     for sub in target_subreddits:
         print(f"正在抓取 r/{sub} ...")
         posts = fetch_reddit_posts(sub, time_filter, fetch_limit)
         
         for post in posts:
-            print(f"  -> 正在使用 Gemini 解析 Reddit: {post['title'][:30]}...") 
+            print(f"  -> 正在解析 Reddit r/{sub}: {post['title'][:30]}...") 
             post['ai_analysis'] = analyze_post_with_ai(post['title'], f"r/{sub}", post['body'], post['url'])
             
         all_content_blocks.append({
+            'type': 'reddit', # 标记数据类型
             'source': f"r/{sub}",
             'posts': posts
         })
         time.sleep(1.5)
         
-    print("\n📦 数据抓取与AI处理完毕，正在推送到飞书...")
+    print("\n📦 数据处理完毕，正在推送到飞书...")
     send_to_feishu(report_title, all_content_blocks)
 
 if __name__ == "__main__":
