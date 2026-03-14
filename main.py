@@ -14,10 +14,10 @@ import html
 FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 AI_API_KEY = os.environ.get("AI_API_KEY") 
 AI_API_URL = "https://api.bltcy.ai/v1/chat/completions"
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")  # 重新请回 RapidAPI 密钥
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")  
 
 # ==========================================
-# 2. 数据获取层 (新增 Twitter & YouTube)
+# 2. 数据获取层 (完美解析版)
 # ==========================================
 def fetch_twitter_trends(limit):
     """通过 RapidAPI 获取 Twitter 地区热搜"""
@@ -37,14 +37,12 @@ def fetch_twitter_trends(limit):
         response.raise_for_status()
         data = response.json()
         
-        # 防御性解析：Twitter 返回的数据通常包裹在列表中
+        # 精准解析 Twitter 的嵌套结构 {"result": [{"trends": [...]}]}
         trends = []
-        if isinstance(data, list) and len(data) > 0 and "trends" in data[0]:
-            trends = data[0]["trends"]
-        elif isinstance(data, dict) and "trends" in data:
-            trends = data["trends"]
-        elif isinstance(data, list):
-            trends = data
+        if isinstance(data, dict) and "result" in data:
+            res_list = data["result"]
+            if isinstance(res_list, list) and len(res_list) > 0 and "trends" in res_list[0]:
+                trends = res_list[0]["trends"]
 
         result_list = []
         for item in trends[:limit]:
@@ -52,7 +50,6 @@ def fetch_twitter_trends(limit):
             volume = item.get("tweet_volume")
             score = f"🔥 {volume} Tweets" if volume else "🔥 热度飙升"
             
-            # Twitter API 返回的 url 通常是 search link
             link = item.get("url") or f"https://twitter.com/search?q={name.replace('#', '%23')}"
             
             result_list.append({
@@ -84,33 +81,30 @@ def fetch_youtube_trends(limit):
         response.raise_for_status()
         data = response.json()
         
-        # 防御性解析：YouTube API 通常将视频列表放在 contents 中
-        contents = data.get("contents", []) if isinstance(data, dict) else data
-        
-        result_list = []
-        for item in contents:
-            if len(result_list) >= limit:
-                break
-                
-            # 解析嵌套结构
-            video = item.get("video", item)
-            title = video.get("title", "未知标题")
-            video_id = video.get("videoId", "")
-            stats = video.get("stats", {})
-            views = stats.get("views") or "高播放量"
+        # 精准解析 YouTube 的结构 {"list": [...]}
+        videos = []
+        if isinstance(data, dict) and "list" in data:
+            videos = data["list"]
             
+        result_list = []
+        for item in videos[:limit]:
+            title = item.get("title", "未知标题")
+            video_id = item.get("videoId", "")
+            
+            # YouTube API 抓取热度兼容
+            views = item.get("viewCount") or item.get("views") or "高热度视频"
             link = f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
             
-            # 获取封面图
-            thumbnails = video.get("thumbnails", [])
+            # 获取封面图 (videoThumbnails 数组)
+            thumbnails = item.get("videoThumbnails", [])
             img_url = thumbnails[0].get("url") if thumbnails else ""
             
             result_list.append({
                 'title': title,
                 'url': img_url,
                 'permalink': link,
-                'body': f"当前 YouTube 热门趋势视频，播放量：{views}",
-                'score': f"▶️ {views} Views"
+                'body': f"当前 YouTube 热门趋势视频，热度：{views}",
+                'score': f"▶️ {views}"
             })
         return result_list
     except Exception as e:
