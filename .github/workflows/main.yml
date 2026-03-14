@@ -1,0 +1,38 @@
+name: Daily Reddit Trends to Feishu
+
+# 触发条件配置
+on:
+  # 1. 允许手动在 GitHub 页面上点击按钮触发（极其方便测试）
+  workflow_dispatch: 
+  
+  # 2. 定时任务 (Cron 表达式)
+  schedule:
+    # 设定在 UTC 1:30 运行（换算为北京时间是每天早上 9:30）
+    # 这样你每天上班刚打完卡，就能在飞书群收到新鲜的海外热梗总结
+    - cron: '30 1 * * *'
+
+jobs:
+  run-daily-bot:
+    runs-on: ubuntu-latest # 使用最新的 Ubuntu 云端环境
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # 拉取你的最新代码
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10' # 指定 Python 版本
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt # 安装刚才写好的 requests 库
+
+      - name: Run main script
+        # 这一步非常关键：将 GitHub Secrets 里的变量映射为程序运行时的环境变量
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        run: |
+          python main.py
