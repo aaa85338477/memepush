@@ -15,58 +15,13 @@ FEISHU_WEBHOOK_URL = os.environ.get("FEISHU_WEBHOOK_URL")
 AI_API_KEY = os.environ.get("AI_API_KEY") 
 AI_API_URL = "https://api.bltcy.ai/v1/chat/completions"
 
-# 新增：RapidAPI 密钥
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
-
 # ==========================================
-# 2. 数据获取层 (新增 TikTok RapidAPI)
+# 2. 数据获取层 (纯净版：KYM + Reddit RSS)
 # ==========================================
-def fetch_tiktok_trends(limit):
-    """通过 RapidAPI 获取 TikTok 美区热门标签"""
-    if not RAPIDAPI_KEY:
-        print("❌ 未配置 RAPIDAPI_KEY，跳过 TikTok 抓取")
-        return []
-
-    url = "https://tiktok-api23.p.rapidapi.com/api/trending/hashtag"
-    querystring = {"page": "1", "limit": str(limit), "period": "120", "country": "US", "sort_by": "popular"}
-    
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "tiktok-api23.p.rapidapi.com",
-        "Content-Type": "application/json"
-    }
-
-    try:
-        response = requests.get(url, headers=headers, params=querystring)
-        response.raise_for_status()
-        data = response.json()
-        
-        # 解析 RapidAPI 返回的结构 (根据常见接口结构适配，如有差异会在报错中体现)
-        # 通常 hashtags 列表在 data['data'] 或直接返回列表中
-        items = data.get('data', []) if isinstance(data, dict) else data
-        
-        result_list = []
-        for item in items[:limit]:
-            # 兼容不同接口的字段名 (name, title, hashtag_name 等)
-            tag_name = item.get('title') or item.get('name') or item.get('hashtag_name') or "未知标签"
-            views = item.get('view_count') or item.get('views') or "热度飙升"
-            
-            result_list.append({
-                'title': f"#{tag_name}",
-                'url': '', # 标签暂无特定图片直链
-                'permalink': f"https://www.tiktok.com/tag/{tag_name.replace('#', '')}",
-                'body': f"当前 TikTok 美区热门流行趋势，热度/播放量指标：{views}",
-                'score': f"👁️ {views}"
-            })
-        return result_list
-    except Exception as e:
-        print(f"抓取 TikTok 趋势失败: {e}")
-        return []
-
 def fetch_reddit_posts(subreddit, time_filter, limit):
     """获取 Reddit 热帖并提取图片和正文"""
     url = f"https://www.reddit.com/r/{subreddit}/top.rss?t={time_filter}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/4.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/5.0'}
 
     try:
         response = requests.get(url, headers=headers)
@@ -161,16 +116,16 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         'Content-Type': 'application/json'
     }
 
-    system_prompt = "你是一个资深的海外游戏试玩广告策划。你的任务是解读海外热点（包括TikTok热梗），提取刺激点转化为买量创意。"
+    system_prompt = "你是一个资深的海外游戏试玩广告策划。你的任务是解读海外热点，提取刺激点转化为买量创意。"
     
     text_prompt = f"""
     信息来源: {source_name}
-    标题/标签: {title}
+    标题: {title}
     正文/背景信息: {body if body else '无附加信息'}
     
-    请结合上述信息（如果只有TikTok标签，请根据你的知识库推测该美区热梗的当前含义），严格按照以下两行格式输出（总字数控制在100字以内，【绝不要】使用任何 Emoji 或特殊表情符号）：
-    解析：(一句话解释这个梗/趋势的核心笑点、痛点或心理学原理)
-    创意：(一句话说明如何将其转化为试玩广告前3秒的画面、互动或二选一选项)
+    请结合上述信息（如果有图片请结合图片内容），严格按照以下两行格式输出（总字数控制在100字以内，【绝不要】使用任何 Emoji 或特殊表情符号）：
+    解析: (一句话解释这个梗/趋势的核心笑点、痛点或心理学原理)
+    创意: (一句话说明如何将其转化为试玩广告前3秒的画面、互动或二选一选项)
     """
 
     user_content = [{"type": "text", "text": text_prompt}]
@@ -198,7 +153,7 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         return "解析: AI 深入解析失败\n创意: 请结合原文直达链接自行查看"
 
 # ==========================================
-# 4. 消息推送层 (三分块排版)
+# 4. 消息推送层 (干净的模块化排版)
 # ==========================================
 def send_to_feishu(report_title, content_blocks):
     """构建分组分块的清晰飞书排版"""
@@ -208,9 +163,8 @@ def send_to_feishu(report_title, content_blocks):
 
     feishu_post_content = []
     
-    # 定义板块的 UI 渲染顺序和标题
+    # 移除 TikTok，保留 KYM 和 Reddit 的 UI 渲染
     section_config = {
-        'tiktok': "🎵 【 TikTok | 美国区高频热词 】\n",
         'kym': "🌐 【 Know Your Meme | 全网流行趋势 】\n",
         'reddit': "👾 【 Reddit | 垂直圈层热点 】\n"
     }
@@ -223,7 +177,6 @@ def send_to_feishu(report_title, content_blocks):
         feishu_post_content.append([{"tag": "text", "text": section_title}])
         
         for block in blocks_of_type:
-            # 如果是 Reddit，额外显示一下具体的 Subreddit 名字
             if section_type == 'reddit':
                 feishu_post_content.append([{"tag": "text", "text": f"◼ {block['source']}"}])
             
@@ -232,10 +185,8 @@ def send_to_feishu(report_title, content_blocks):
                 continue
                 
             for index, post in enumerate(block['posts'], start=1):
-                # 标题层
-                feishu_post_content.append([{"tag": "text", "text": f"   {index}. {post['title']}  ({post['score']})"}])
+                feishu_post_content.append([{"tag": "text", "text": f"   {index}. {post['title']}"}])
                 
-                # 链接层
                 link_line = [{"tag": "text", "text": "      ↳ 链接: "}]
                 if post['url']:
                     link_line.append({"tag": "a", "text": "[查看视觉素材]", "href": post['url']})
@@ -243,7 +194,6 @@ def send_to_feishu(report_title, content_blocks):
                 link_line.append({"tag": "a", "text": "[原文直达]", "href": post['permalink']})
                 feishu_post_content.append(link_line)
                 
-                # AI 解析层
                 ai_lines = post['ai_analysis'].split('\n')
                 for line in ai_lines:
                     clean_line = line.strip()
@@ -268,11 +218,16 @@ def send_to_feishu(report_title, content_blocks):
 # 5. 主程序控制中枢
 # ==========================================
 def main():
+    # 核心信息源矩阵 (已加入 TikTok 搬运与作死/新奇板块)
     target_subreddits = [
         'memes',
         'oddlysatisfying',
         'shittymobilegameads',
         'AmItheAsshole',
+        'TikTokCringe',      # TikTok 每日爆款精选
+        'tiktokgossip',      # TikTok 抓马八卦
+        'holdmybeer',        # 作死极限挑战
+        'mildlyinteresting', # 视觉奇观/新奇事物
     ]
 
     today_weekday = datetime.today().weekday()
@@ -288,22 +243,7 @@ def main():
     print(f"🎯 正在生成: {report_title}...\n")
     all_content_blocks = []
 
-    # --- 1. 抓取 TikTok 趋势 ---
-    print("正在抓取 TikTok 热词...")
-    tiktok_posts = fetch_tiktok_trends(fetch_limit)
-    if tiktok_posts:
-        for post in tiktok_posts:
-            print(f"  -> 正在解析 TikTok: {post['title']}...") 
-            post['ai_analysis'] = analyze_post_with_ai(post['title'], "TikTok 美区 Trending", post['body'], post['url'])
-        
-        all_content_blocks.append({
-            'type': 'tiktok',
-            'source': 'TikTok US',
-            'posts': tiktok_posts
-        })
-    time.sleep(1.5)
-
-    # --- 2. 抓取 Know Your Meme ---
+    # --- 1. 抓取 Know Your Meme ---
     print("正在抓取 Know Your Meme 趋势...")
     kym_posts = fetch_kym_news(fetch_limit)
     if kym_posts:
@@ -318,7 +258,7 @@ def main():
         })
     time.sleep(1.5)
 
-    # --- 3. 抓取 Reddit ---
+    # --- 2. 抓取 Reddit ---
     for sub in target_subreddits:
         print(f"正在抓取 r/{sub} ...")
         posts = fetch_reddit_posts(sub, time_filter, fetch_limit)
