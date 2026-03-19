@@ -7,7 +7,6 @@ import json
 import xml.etree.ElementTree as ET
 import re
 import html
-from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup 
 
 # ==========================================
@@ -19,13 +18,10 @@ AI_API_URL = "https://api.bltcy.ai/v1/chat/completions"
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")  
 
 # ==========================================
-# 2. 数据获取层 (四大源站全接入)
+# 2. 数据获取层 
 # ==========================================
 def fetch_twitter_trends(limit):
-    """抓取 Twitter 美国区热搜"""
-    if not RAPIDAPI_KEY:
-        print("❌ 未配置 RAPIDAPI_KEY，跳过 Twitter 抓取")
-        return []
+    if not RAPIDAPI_KEY: return []
     url = "https://twitter241.p.rapidapi.com/trends-by-location"
     querystring = {"woeid": "2424766"} 
     headers = {"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": "twitter241.p.rapidapi.com"}
@@ -51,10 +47,7 @@ def fetch_twitter_trends(limit):
         return []
 
 def fetch_youtube_trends(limit):
-    """抓取 YouTube 美国区趋势视频"""
-    if not RAPIDAPI_KEY:
-        print("❌ 未配置 RAPIDAPI_KEY，跳过 YouTube 抓取")
-        return []
+    if not RAPIDAPI_KEY: return []
     url = "https://youtube138.p.rapidapi.com/v2/trending"
     headers = {"x-rapidapi-key": RAPIDAPI_KEY, "x-rapidapi-host": "youtube138.p.rapidapi.com"}
     try:
@@ -77,9 +70,8 @@ def fetch_youtube_trends(limit):
         return []
 
 def fetch_reddit_posts(subreddit, time_filter, limit):
-    """抓取 Reddit 各大核心板块热帖"""
     url = f"https://www.reddit.com/r/{subreddit}/top.rss?t={time_filter}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/7.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/8.0'}
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -104,7 +96,7 @@ def fetch_reddit_posts(subreddit, time_filter, limit):
         return []
 
 def fetch_kym_trending(limit):
-    """实时解析 KYM 首页获取每天变动的 Trending 梗，加入严格的系统页面过滤"""
+    """采用全新严格黑名单的 KYM 解析器"""
     url = "https://knowyourmeme.com/"
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     try:
@@ -115,18 +107,34 @@ def fetch_kym_trending(limit):
         result_list = []
         seen_titles = set()
         
-        # 拦截所有的系统级误触页面
-        regex_pattern = r'^/memes/(?!subcultures|people|cultures|events|submit|submissions|confirmed|popular|search)[\w-]+$'
-        meme_links = soup.find_all('a', href=re.compile(regex_pattern))
+        # KYM 所有的系统导航页黑名单（绝对隔离）
+        blacklist = {'subcultures', 'people', 'cultures', 'events', 'submit', 'submissions', 'confirmed', 'popular', 'search', 'newsworthy', 'latest', 'editorials', 'forums', 'random', 'about', 'rules'}
+        
+        meme_links = soup.find_all('a', href=True)
         
         for a_tag in meme_links:
             if len(result_list) >= limit:
                 break
+                
+            href = a_tag['href']
+            # 只处理 /memes/ 开头的链接
+            if not href.startswith('/memes/'):
+                continue
+                
+            parts = href.strip('/').split('/')
+            # 必须恰好是两部分，比如 ['memes', 'deadpool']
+            if len(parts) != 2:
+                continue
+                
+            meme_id = parts[1].lower()
+            if meme_id in blacklist:
+                continue
+                
             title = a_tag.get_text(strip=True)
-            if not title or title in seen_titles or len(title) < 3:
+            if not title or title.lower() in blacklist or title in seen_titles or len(title) < 3:
                 continue
             
-            link = f"https://knowyourmeme.com{a_tag['href']}"
+            link = f"https://knowyourmeme.com{href}"
             img_url = ""
             img_tag = a_tag.find('img') or a_tag.find_previous('img')
             if img_tag:
@@ -143,14 +151,14 @@ def fetch_kym_trending(limit):
             
         return result_list
     except Exception as e:
-        print(f"抓取 Know Your Meme 首页失败: {e}")
+        print(f"抓取 Know Your Meme 失败: {e}")
         return []
 
 # ==========================================
-# 3. AI 业务处理层 (加入限流重试机制)
+# 3. AI 业务处理层 (防限流版)
 # ==========================================
 def analyze_post_with_ai(title, source_name, body, img_url):
-    """调用大模型，定向产出 SLG 创意，自带自动重试机制"""
+    """调用大模型，带有强力重试抗压机制"""
     if not AI_API_KEY:
          return "解析: 未配置 AI 密钥\n创意: 无法生成"
 
@@ -186,35 +194,40 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         "max_tokens": 150
     }
 
-    # 加入重试与超时熔断，防止大批量数据卡死
+    # 允许 3 次重试，每次失败强制休眠 3 秒
     for attempt in range(3):
         try:
-            response = requests.post(AI_API_URL, headers=headers, json=payload, timeout=15)
+            response = requests.post(AI_API_URL, headers=headers, json=payload, timeout=20)
+            if response.status_code == 429: # 捕捉限流状态码
+                time.sleep(3)
+                continue
             response.raise_for_status() 
             return response.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
-            print(f"     [AI 警告] 解析《{title[:10]}...》失败 (尝试 {attempt+1}/3): {e}")
-            time.sleep(2) 
+            print(f"     [AI 警告] 解析《{title[:10]}...》超时 (尝试 {attempt+1}/3)... 正在重试")
+            time.sleep(3) 
             
-    return "解析: AI 接口繁忙，多次尝试失败\n创意: 请结合原文直达链接自行查看"
+    return "解析: AI 接口严格限流，解析失败\n创意: 请结合原文直达链接自行查看"
 
 def batch_analyze_posts(posts, source_name):
-    """多线程并发引擎，极速处理 AI 响应，降压求稳"""
+    """降级为单线程顺序处理，彻底根治 API 并发限制导致的封杀"""
     if not posts: return []
-    print(f"  -> ⚡ 启动并发解析 {source_name} 的 {len(posts)} 条数据...")
+    print(f"  -> ⚡ 启动顺序解析 {source_name} 的 {len(posts)} 条数据 (已开启 API 防封禁限速保护)...")
     
     valid_posts = []
-    # 线程数控制为 3，保护中转平台 API 接口
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        results = executor.map(lambda p: analyze_post_with_ai(p['title'], source_name, p['body'], p['url']), posts)
+    
+    for post in posts:
+        ai_result = analyze_post_with_ai(post['title'], source_name, post['body'], post['url'])
         
-        for post, ai_result in zip(posts, results):
-            if ai_result == '跳过':
-                print(f"     [过滤拦截] 判定为敏感内容自动丢弃: {post['title'][:20]}...")
-                continue
+        if ai_result == '跳过':
+            print(f"     [过滤拦截] 敏感或非游戏内容自动丢弃: {post['title'][:20]}...")
+            continue
             
-            post['ai_analysis'] = ai_result
-            valid_posts.append(post)
+        post['ai_analysis'] = ai_result
+        valid_posts.append(post)
+        
+        # 核心防封禁锁：每次请求完毕强制休眠 2.5 秒，温柔对待中转站接口
+        time.sleep(2.5) 
             
     return valid_posts
 
@@ -293,7 +306,7 @@ def main():
         valid_posts = batch_analyze_posts(youtube_posts, "YouTube US")
         if valid_posts: all_content_blocks.append({'type': 'youtube', 'source': 'YouTube US', 'posts': valid_posts})
 
-    # KYM (实时版 + 去噪音)
+    # KYM 
     print("正在抓取 Know Your Meme 实时热榜...")
     kym_posts = fetch_kym_trending(fetch_limit) 
     if kym_posts:
@@ -308,7 +321,7 @@ def main():
             valid_posts = batch_analyze_posts(posts, f"r/{sub}")
             if valid_posts: all_content_blocks.append({'type': 'reddit', 'source': f"r/{sub}", 'posts': valid_posts})
         
-    print("\n📦 全网并发处理与过滤完毕，正在推送到飞书...")
+    print("\n📦 全网顺序处理与过滤完毕，正在推送到飞书...")
     send_to_feishu(report_title, all_content_blocks)
 
 if __name__ == "__main__":
