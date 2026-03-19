@@ -7,7 +7,8 @@ import json
 import xml.etree.ElementTree as ET
 import re
 import html
-from concurrent.futures import ThreadPoolExecutor # 🚀 新增：多线程并发库
+from concurrent.futures import ThreadPoolExecutor
+from bs4 import BeautifulSoup # 🚀 新增：网页解析神器
 
 # ==========================================
 # 1. 核心配置区
@@ -18,9 +19,10 @@ AI_API_URL = "https://api.bltcy.ai/v1/chat/completions"
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")  
 
 # ==========================================
-# 2. 数据获取层 
+# 2. 数据获取层 (四大源站全接入)
 # ==========================================
 def fetch_twitter_trends(limit):
+    """抓取 Twitter 美国区热搜"""
     if not RAPIDAPI_KEY:
         print("❌ 未配置 RAPIDAPI_KEY，跳过 Twitter 抓取")
         return []
@@ -49,6 +51,7 @@ def fetch_twitter_trends(limit):
         return []
 
 def fetch_youtube_trends(limit):
+    """抓取 YouTube 美国区趋势视频"""
     if not RAPIDAPI_KEY:
         print("❌ 未配置 RAPIDAPI_KEY，跳过 YouTube 抓取")
         return []
@@ -74,6 +77,7 @@ def fetch_youtube_trends(limit):
         return []
 
 def fetch_reddit_posts(subreddit, time_filter, limit):
+    """抓取 Reddit 各大核心板块热帖"""
     url = f"https://www.reddit.com/r/{subreddit}/top.rss?t={time_filter}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/7.0'}
     try:
@@ -99,33 +103,50 @@ def fetch_reddit_posts(subreddit, time_filter, limit):
         print(f"抓取 Reddit r/{subreddit} 失败: {e}")
         return []
 
-def fetch_kym_news(limit):
-    url = "https://knowyourmeme.com/news.rss"
+def fetch_kym_trending(limit):
+    """实时解析 KYM 首页获取每天变动的 Trending 梗"""
+    url = "https://knowyourmeme.com/"
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     try:
         response = scraper.get(url)
         response.raise_for_status()
-        root = ET.fromstring(response.content)
-        items = root.findall('.//item')
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
         result_list = []
-        for item in items[:limit]:
-            title = item.find('title').text if item.find('title') is not None else "无标题"
-            link = item.find('link').text if item.find('link') is not None else ""
-            description = item.find('description').text if item.find('description') is not None else ""
-            img_url, post_body = "", ""
-            if description:
-                img_match = re.search(r'src="(https://i\.kym-cdn\.com/[^"]+)"', description)
-                if img_match: img_url = img_match.group(1)
-                clean_text = re.sub(r'<[^>]+>', ' ', html.unescape(description))
-                post_body = re.sub(r'\s+', ' ', clean_text).strip()[:500]
-            result_list.append({'title': title, 'url': img_url, 'permalink': link, 'body': post_body, 'score': '📰 最新趋势'})
+        seen_titles = set()
+        
+        # 精准捕获热门词条链接
+        meme_links = soup.find_all('a', href=re.compile(r'^/memes/(?!subcultures|people|cultures|events)[\w-]+$'))
+        
+        for a_tag in meme_links:
+            if len(result_list) >= limit:
+                break
+            title = a_tag.get_text(strip=True)
+            if not title or title in seen_titles or len(title) < 3:
+                continue
+            
+            link = f"https://knowyourmeme.com{a_tag['href']}"
+            img_url = ""
+            img_tag = a_tag.find('img') or a_tag.find_previous('img')
+            if img_tag:
+                img_url = img_tag.get('data-src') or img_tag.get('src', '')
+                
+            result_list.append({
+                'title': title,
+                'url': img_url,
+                'permalink': link,
+                'body': "KYM 首页实时 Trending 榜单热梗",
+                'score': '📈 实时飙升'
+            })
+            seen_titles.add(title)
+            
         return result_list
     except Exception as e:
-        print(f"抓取 Know Your Meme 失败: {e}")
+        print(f"抓取 Know Your Meme 首页失败: {e}")
         return []
 
 # ==========================================
-# 3. AI 业务处理层 (定制化项目 Prompt + 噪音过滤)
+# 3. AI 业务处理层 (定制化鼠疫 SLG Prompt + 噪音过滤)
 # ==========================================
 def analyze_post_with_ai(title, source_name, body, img_url):
     """调用大模型，定向产出中世纪鼠疫SLG创意，并拥有跳过权限"""
@@ -134,12 +155,10 @@ def analyze_post_with_ai(title, source_name, body, img_url):
 
     headers = {'Accept': 'application/json', 'Authorization': f'Bearer {AI_API_KEY}', 'Content-Type': 'application/json'}
 
-    # 🚀 方案一：硬核项目背景植入
     system_prompt = """你是一位拥有五年经验的资深出海游戏买量与试玩广告（Playable Ad）策划。
     你目前正在主导一款核心手游产品：【中世纪鼠疫（黑死病）背景，前期为模拟经营（建造避难所、收容难民、分配草药/食物），后期转为SLG（暴兵、大地图战略、结盟、资源掠夺）的混合型游戏】。
     你的任务是无情过滤全网热点，并将其转化为该游戏的极致转化买量创意。"""
     
-    # 🚀 方案二：脏数据过滤与指令限制
     text_prompt = f"""
     信息来源: {source_name}
     标题/话题: {title}
@@ -173,16 +192,13 @@ def analyze_post_with_ai(title, source_name, body, img_url):
     except Exception as e:
         return "解析: AI 解析超时\n创意: 请结合原文直达链接自行查看"
 
-# 🚀 方案四：多线程并发处理引擎
 def batch_analyze_posts(posts, source_name):
-    """使用线程池并发处理数据源，大幅提升速度并剔除垃圾数据"""
+    """多线程并发引擎，极速处理 AI 响应"""
     if not posts: return []
     print(f"  -> ⚡ 启动并发解析 {source_name} 的 {len(posts)} 条数据...")
     
     valid_posts = []
-    # 设置最大线程数，避免触发 API 频控
     with ThreadPoolExecutor(max_workers=5) as executor:
-        # map 函数能保证结果顺序与传入的帖子顺序完全一致 (保留 Top 榜单价值)
         results = executor.map(lambda p: analyze_post_with_ai(p['title'], source_name, p['body'], p['url']), posts)
         
         for post, ai_result in zip(posts, results):
@@ -270,14 +286,16 @@ def main():
         valid_posts = batch_analyze_posts(youtube_posts, "YouTube US")
         if valid_posts: all_content_blocks.append({'type': 'youtube', 'source': 'YouTube US', 'posts': valid_posts})
 
-    # KYM
-    kym_posts = fetch_kym_news(fetch_limit)
+    # KYM (现已升级为实时 Trending 版)
+    print("正在抓取 Know Your Meme 实时热榜...")
+    kym_posts = fetch_kym_trending(fetch_limit) 
     if kym_posts:
         valid_posts = batch_analyze_posts(kym_posts, "Know Your Meme")
         if valid_posts: all_content_blocks.append({'type': 'kym', 'source': 'Know Your Meme', 'posts': valid_posts})
 
     # Reddit
     for sub in target_subreddits:
+        print(f"正在抓取 r/{sub} ...")
         posts = fetch_reddit_posts(sub, time_filter, fetch_limit)
         if posts:
             valid_posts = batch_analyze_posts(posts, f"r/{sub}")
