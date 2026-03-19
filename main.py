@@ -7,7 +7,6 @@ import json
 import xml.etree.ElementTree as ET
 import re
 import html
-from bs4 import BeautifulSoup 
 
 # ==========================================
 # 1. 核心配置区
@@ -18,7 +17,7 @@ AI_API_URL = "https://api.bltcy.ai/v1/chat/completions"
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")  
 
 # ==========================================
-# 2. 数据获取层 
+# 2. 数据获取层 (万能 RSS 引擎 + API)
 # ==========================================
 def fetch_twitter_trends(limit):
     if not RAPIDAPI_KEY: return []
@@ -71,7 +70,7 @@ def fetch_youtube_trends(limit):
 
 def fetch_reddit_posts(subreddit, time_filter, limit):
     url = f"https://www.reddit.com/r/{subreddit}/top.rss?t={time_filter}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/8.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 RSSReader/9.0'}
     try:
         response = requests.get(url, headers=headers)
         response.raise_for_status()
@@ -88,71 +87,53 @@ def fetch_reddit_posts(subreddit, time_filter, limit):
                 img_match = re.search(r'href="(https://i\.redd\.it/[^"]+)"', content.text)
                 if img_match: img_url = img_match.group(1)
                 clean_text = re.sub(r'<[^>]+>', ' ', html.unescape(content.text))
-                post_body = re.sub(r'\s+', ' ', clean_text).strip()[:500] 
-            result_list.append({'title': title, 'url': img_url, 'permalink': link, 'body': post_body, 'score': '🔥 榜单前列'})
+                # 严格限制字数，保护 AI 接口 Token 额度
+                post_body = re.sub(r'\s+', ' ', clean_text).strip()[:400] 
+            result_list.append({'title': title, 'url': img_url, 'permalink': link, 'body': post_body, 'score': '🔥 Reddit榜单前列'})
         return result_list
     except Exception as e:
         print(f"抓取 Reddit r/{subreddit} 失败: {e}")
         return []
 
-def fetch_kym_trending(limit):
-    """采用全新严格黑名单的 KYM 解析器"""
-    url = "https://knowyourmeme.com/"
+def fetch_generic_rss(url, source_name, limit):
+    """万能 RSS 解析器，通杀 KYM、BoredPanda 等标准 RSS 源"""
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     try:
         response = scraper.get(url)
         response.raise_for_status()
+        root = ET.fromstring(response.content)
+        items = root.findall('.//item')
         
-        soup = BeautifulSoup(response.text, 'html.parser')
         result_list = []
-        seen_titles = set()
-        
-        blacklist = {'subcultures', 'people', 'cultures', 'events', 'submit', 'submissions', 'confirmed', 'popular', 'search', 'newsworthy', 'latest', 'editorials', 'forums', 'random', 'about', 'rules'}
-        
-        meme_links = soup.find_all('a', href=True)
-        
-        for a_tag in meme_links:
-            if len(result_list) >= limit:
-                break
-                
-            href = a_tag['href']
-            if not href.startswith('/memes/'):
-                continue
-                
-            parts = href.strip('/').split('/')
-            if len(parts) != 2:
-                continue
-                
-            meme_id = parts[1].lower()
-            if meme_id in blacklist:
-                continue
-                
-            title = a_tag.get_text(strip=True)
-            if not title or title.lower() in blacklist or title in seen_titles or len(title) < 3:
-                continue
+        for item in items[:limit]:
+            title = item.find('title').text if item.find('title') is not None else "无标题"
+            link = item.find('link').text if item.find('link') is not None else ""
+            description = item.find('description').text if item.find('description') is not None else ""
             
-            link = f"https://knowyourmeme.com{href}"
-            img_url = ""
-            img_tag = a_tag.find('img') or a_tag.find_previous('img')
-            if img_tag:
-                img_url = img_tag.get('data-src') or img_tag.get('src', '')
+            img_url, post_body = "", ""
+            if description:
+                # 尝试提取正文中的图片
+                img_match = re.search(r'src="([^"]+)"', description)
+                if img_match: img_url = img_match.group(1)
+                
+                clean_text = re.sub(r'<[^>]+>', ' ', html.unescape(description))
+                # 严格限制字数，保护 AI 接口 Token 额度
+                post_body = re.sub(r'\s+', ' ', clean_text).strip()[:400] 
                 
             result_list.append({
                 'title': title,
                 'url': img_url,
                 'permalink': link,
-                'body': "KYM 首页实时 Trending 榜单热梗",
-                'score': '📈 实时飙升'
+                'body': post_body,
+                'score': f'📰 {source_name} 最新发布'
             })
-            seen_titles.add(title)
-            
         return result_list
     except Exception as e:
-        print(f"抓取 Know Your Meme 失败: {e}")
+        print(f"抓取 {source_name} RSS 失败: {e}")
         return []
 
 # ==========================================
-# 3. AI 业务处理层 (加入动态指数退避算法)
+# 3. AI 业务处理层 (稳定防限流)
 # ==========================================
 def analyze_post_with_ai(title, source_name, body, img_url):
     if not AI_API_KEY:
@@ -190,27 +171,21 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         "max_tokens": 150
     }
 
-    # 🚀 绝杀技：指数退避重试机制 (Exponential Backoff)
-    for attempt in range(4): # 增加到 4 次重试机会
+    # API 请求保持单线程串行，增加 3 次容错重试
+    for attempt in range(3):
         try:
             response = requests.post(AI_API_URL, headers=headers, json=payload, timeout=20)
-            if response.status_code == 429: 
-                wait_time = (attempt + 1) * 5 # 动态休眠：5秒, 10秒, 15秒
-                print(f"     [API 限流] 触发 429 报错，等待 {wait_time} 秒后重试...")
-                time.sleep(wait_time)
-                continue
             response.raise_for_status() 
             return response.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
-            wait_time = (attempt + 1) * 5
-            print(f"     [AI 报错] 解析《{title[:10]}...》超时/报错 (尝试 {attempt+1}/4)，休眠 {wait_time} 秒: {e}")
-            time.sleep(wait_time) 
+            print(f"     [AI 警告] 解析《{title[:10]}...》失败 (尝试 {attempt+1}/3): {e}")
+            time.sleep(3) # 失败休眠3秒后重试
             
-    return "解析: AI 接口严格限流，多次重试后仍失败\n创意: 请结合原文直达链接自行查看"
+    return "解析: AI 接口繁忙或达到限制，解析失败\n创意: 请结合原文直达链接自行查看"
 
 def batch_analyze_posts(posts, source_name):
     if not posts: return []
-    print(f"  -> ⚡ 启动顺序解析 {source_name} 的 {len(posts)} 条数据 (已开启深度防封禁保护)...")
+    print(f"  -> ⚡ 启动顺序解析 {source_name} 的 {len(posts)} 条数据 (已开启 API 保护)...")
     
     valid_posts = []
     
@@ -224,8 +199,8 @@ def batch_analyze_posts(posts, source_name):
         post['ai_analysis'] = ai_result
         valid_posts.append(post)
         
-        # 🚀 彻底降速：每个请求之间强制休息 5 秒
-        time.sleep(5) 
+        # 核心防封禁锁：因为 RSS 文本极短，每条请求间歇 3 秒足以保障安全
+        time.sleep(3) 
             
     return valid_posts
 
@@ -235,35 +210,34 @@ def batch_analyze_posts(posts, source_name):
 def send_to_feishu(report_title, content_blocks):
     if not FEISHU_WEBHOOK_URL: return
     feishu_post_content = []
-    section_config = {
-        'twitter': "🐦 【 Twitter | 实时话题榜 】\n",
-        'youtube': "▶️ 【 YouTube | 热门视频趋势 】\n",
-        'kym': "🌐 【 Know Your Meme | 全网流行趋势 】\n",
-        'reddit': "👾 【 Reddit | 垂直圈层热点 】\n"
-    }
-
-    for section_type, section_title in section_config.items():
-        blocks_of_type = [b for b in content_blocks if b['type'] == section_type]
-        if not blocks_of_type: continue
+    
+    # 动态渲染区块，兼容无限拓展的 RSS 源
+    for block in content_blocks:
+        source_title = block['source']
+        
+        # 根据来源动态匹配 Emoji 图标
+        icon = "👾"
+        if "Twitter" in source_title: icon = "🐦"
+        elif "YouTube" in source_title: icon = "▶️"
+        elif "RSS" in source_title: icon = "🌐"
+        
+        feishu_post_content.append([{"tag": "text", "text": f"{icon} 【 {source_title} 】\n"}])
+        
+        if not block['posts']:
+            feishu_post_content.append([{"tag": "text", "text": "   (内容已被 AI 过滤或暂无有效数据)\n\n"}])
+            continue
             
-        feishu_post_content.append([{"tag": "text", "text": section_title}])
-        for block in blocks_of_type:
-            if section_type == 'reddit': feishu_post_content.append([{"tag": "text", "text": f"◼ {block['source']}"}])
-            if not block['posts']:
-                feishu_post_content.append([{"tag": "text", "text": "   (内容已被 AI 过滤或暂无抓取到有效数据)\n\n"}])
-                continue
-                
-            for index, post in enumerate(block['posts'], start=1):
-                feishu_post_content.append([{"tag": "text", "text": f"   {index}. {post['title']}  ({post['score']})"}])
-                link_line = [{"tag": "text", "text": "      ↳ 链接: "}]
-                if post['url']: link_line.extend([{"tag": "a", "text": "[查看封面/视觉素材]", "href": post['url']}, {"tag": "text", "text": " | "}])
-                if post['permalink']: link_line.append({"tag": "a", "text": "[原文直达]", "href": post['permalink']})
-                feishu_post_content.append(link_line)
-                
-                for line in post['ai_analysis'].split('\n'):
-                    clean_line = line.strip().replace("解析：", "解析: ").replace("创意：", "创意: ")
-                    if clean_line: feishu_post_content.append([{"tag": "text", "text": f"      ▪ {clean_line}"}])
-                feishu_post_content.append([{"tag": "text", "text": "\n"}])
+        for index, post in enumerate(block['posts'], start=1):
+            feishu_post_content.append([{"tag": "text", "text": f"   {index}. {post['title']}  ({post['score']})"}])
+            link_line = [{"tag": "text", "text": "      ↳ 链接: "}]
+            if post['url']: link_line.extend([{"tag": "a", "text": "[查看封面/视觉素材]", "href": post['url']}, {"tag": "text", "text": " | "}])
+            if post['permalink']: link_line.append({"tag": "a", "text": "[原文直达]", "href": post['permalink']})
+            feishu_post_content.append(link_line)
+            
+            for line in post['ai_analysis'].split('\n'):
+                clean_line = line.strip().replace("解析：", "解析: ").replace("创意：", "创意: ")
+                if clean_line: feishu_post_content.append([{"tag": "text", "text": f"      ▪ {clean_line}"}])
+            feishu_post_content.append([{"tag": "text", "text": "\n"}])
 
     payload = {"msg_type": "post", "content": {"post": {"zh_cn": {"title": report_title, "content": feishu_post_content}}}}
     try:
@@ -276,15 +250,22 @@ def send_to_feishu(report_title, content_blocks):
 # 5. 主程序控制中枢
 # ==========================================
 def main():
+    # 💎 优化后的 Reddit 矩阵 (加入 MemeEconomy 和纯净版爆笑推特)
     target_subreddits = [
-        'memes', 'oddlysatisfying', 'shittymobilegameads', 'AmItheAsshole',
+        'memes', 'oddlysatisfying', 'MemeEconomy', 'NonPoliticalTwitter',
         'TikTokCringe', 'tiktokgossip', 'holdmybeer', 'mildlyinteresting',
+    ]
+    
+    # 💎 万能 RSS 订阅源列表 (极度稳定，不会超长)
+    rss_feeds = [
+        {"name": "Know Your Meme", "url": "https://knowyourmeme.com/news.rss"},
+        {"name": "Bored Panda", "url": "https://www.boredpanda.com/feed/"}
     ]
 
     today_weekday = datetime.today().weekday()
     if today_weekday == 0:
         report_title = "🏰 [周一盘点] 鼠疫SLG：全球爆款素材提取报告"
-        time_filter, fetch_limit = 'week', 10
+        time_filter, fetch_limit = 'week', 8
     else:
         report_title = "🛡️ [日常速递] 鼠疫SLG：全球爆款素材提取报告"
         time_filter, fetch_limit = 'day', 3
@@ -292,32 +273,33 @@ def main():
     print(f"🎯 正在生成: {report_title}...\n")
     all_content_blocks = []
 
-    # Twitter
+    # 1. 抓取 Twitter
     twitter_posts = fetch_twitter_trends(fetch_limit)
     if twitter_posts:
-        valid_posts = batch_analyze_posts(twitter_posts, "Twitter US")
-        if valid_posts: all_content_blocks.append({'type': 'twitter', 'source': 'Twitter US', 'posts': valid_posts})
+        valid_posts = batch_analyze_posts(twitter_posts, "Twitter 实时热搜")
+        if valid_posts: all_content_blocks.append({'source': 'Twitter 实时热搜', 'posts': valid_posts})
 
-    # YouTube
+    # 2. 抓取 YouTube
     youtube_posts = fetch_youtube_trends(fetch_limit)
     if youtube_posts:
-        valid_posts = batch_analyze_posts(youtube_posts, "YouTube US")
-        if valid_posts: all_content_blocks.append({'type': 'youtube', 'source': 'YouTube US', 'posts': valid_posts})
+        valid_posts = batch_analyze_posts(youtube_posts, "YouTube 热门趋势")
+        if valid_posts: all_content_blocks.append({'source': 'YouTube 热门趋势', 'posts': valid_posts})
 
-    # KYM 
-    print("正在抓取 Know Your Meme 实时热榜...")
-    kym_posts = fetch_kym_trending(fetch_limit) 
-    if kym_posts:
-        valid_posts = batch_analyze_posts(kym_posts, "Know Your Meme")
-        if valid_posts: all_content_blocks.append({'type': 'kym', 'source': 'Know Your Meme', 'posts': valid_posts})
+    # 3. 抓取 万能 RSS 源矩阵
+    for feed in rss_feeds:
+        print(f"正在抓取 {feed['name']} RSS...")
+        posts = fetch_generic_rss(feed['url'], feed['name'], fetch_limit)
+        if posts:
+            valid_posts = batch_analyze_posts(posts, f"{feed['name']} (RSS)")
+            if valid_posts: all_content_blocks.append({'source': f"{feed['name']} (RSS)", 'posts': valid_posts})
 
-    # Reddit
+    # 4. 抓取 Reddit
     for sub in target_subreddits:
         print(f"正在抓取 r/{sub} ...")
         posts = fetch_reddit_posts(sub, time_filter, fetch_limit)
         if posts:
-            valid_posts = batch_analyze_posts(posts, f"r/{sub}")
-            if valid_posts: all_content_blocks.append({'type': 'reddit', 'source': f"r/{sub}", 'posts': valid_posts})
+            valid_posts = batch_analyze_posts(posts, f"Reddit r/{sub}")
+            if valid_posts: all_content_blocks.append({'source': f"Reddit r/{sub}", 'posts': valid_posts})
         
     print("\n📦 全网顺序处理与过滤完毕，正在推送到飞书...")
     send_to_feishu(report_title, all_content_blocks)
