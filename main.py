@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 import re
 import html
 from concurrent.futures import ThreadPoolExecutor
-from bs4 import BeautifulSoup # 🚀 新增：网页解析神器
+from bs4 import BeautifulSoup 
 
 # ==========================================
 # 1. 核心配置区
@@ -104,7 +104,7 @@ def fetch_reddit_posts(subreddit, time_filter, limit):
         return []
 
 def fetch_kym_trending(limit):
-    """实时解析 KYM 首页获取每天变动的 Trending 梗"""
+    """实时解析 KYM 首页获取每天变动的 Trending 梗，加入严格的系统页面过滤"""
     url = "https://knowyourmeme.com/"
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     try:
@@ -115,8 +115,9 @@ def fetch_kym_trending(limit):
         result_list = []
         seen_titles = set()
         
-        # 精准捕获热门词条链接
-        meme_links = soup.find_all('a', href=re.compile(r'^/memes/(?!subcultures|people|cultures|events)[\w-]+$'))
+        # 拦截所有的系统级误触页面
+        regex_pattern = r'^/memes/(?!subcultures|people|cultures|events|submit|submissions|confirmed|popular|search)[\w-]+$'
+        meme_links = soup.find_all('a', href=re.compile(regex_pattern))
         
         for a_tag in meme_links:
             if len(result_list) >= limit:
@@ -146,10 +147,10 @@ def fetch_kym_trending(limit):
         return []
 
 # ==========================================
-# 3. AI 业务处理层 (定制化鼠疫 SLG Prompt + 噪音过滤)
+# 3. AI 业务处理层 (加入限流重试机制)
 # ==========================================
 def analyze_post_with_ai(title, source_name, body, img_url):
-    """调用大模型，定向产出中世纪鼠疫SLG创意，并拥有跳过权限"""
+    """调用大模型，定向产出 SLG 创意，自带自动重试机制"""
     if not AI_API_KEY:
          return "解析: 未配置 AI 密钥\n创意: 无法生成"
 
@@ -185,25 +186,31 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         "max_tokens": 150
     }
 
-    try:
-        response = requests.post(AI_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        return "解析: AI 解析超时\n创意: 请结合原文直达链接自行查看"
+    # 加入重试与超时熔断，防止大批量数据卡死
+    for attempt in range(3):
+        try:
+            response = requests.post(AI_API_URL, headers=headers, json=payload, timeout=15)
+            response.raise_for_status() 
+            return response.json()['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            print(f"     [AI 警告] 解析《{title[:10]}...》失败 (尝试 {attempt+1}/3): {e}")
+            time.sleep(2) 
+            
+    return "解析: AI 接口繁忙，多次尝试失败\n创意: 请结合原文直达链接自行查看"
 
 def batch_analyze_posts(posts, source_name):
-    """多线程并发引擎，极速处理 AI 响应"""
+    """多线程并发引擎，极速处理 AI 响应，降压求稳"""
     if not posts: return []
     print(f"  -> ⚡ 启动并发解析 {source_name} 的 {len(posts)} 条数据...")
     
     valid_posts = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # 线程数控制为 3，保护中转平台 API 接口
+    with ThreadPoolExecutor(max_workers=3) as executor:
         results = executor.map(lambda p: analyze_post_with_ai(p['title'], source_name, p['body'], p['url']), posts)
         
         for post, ai_result in zip(posts, results):
             if ai_result == '跳过':
-                print(f"     [过滤拦截] 判定为非游戏/敏感内容，已自动丢弃: {post['title'][:20]}...")
+                print(f"     [过滤拦截] 判定为敏感内容自动丢弃: {post['title'][:20]}...")
                 continue
             
             post['ai_analysis'] = ai_result
@@ -286,7 +293,7 @@ def main():
         valid_posts = batch_analyze_posts(youtube_posts, "YouTube US")
         if valid_posts: all_content_blocks.append({'type': 'youtube', 'source': 'YouTube US', 'posts': valid_posts})
 
-    # KYM (现已升级为实时 Trending 版)
+    # KYM (实时版 + 去噪音)
     print("正在抓取 Know Your Meme 实时热榜...")
     kym_posts = fetch_kym_trending(fetch_limit) 
     if kym_posts:
