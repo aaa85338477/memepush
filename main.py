@@ -107,7 +107,6 @@ def fetch_kym_trending(limit):
         result_list = []
         seen_titles = set()
         
-        # KYM 所有的系统导航页黑名单（绝对隔离）
         blacklist = {'subcultures', 'people', 'cultures', 'events', 'submit', 'submissions', 'confirmed', 'popular', 'search', 'newsworthy', 'latest', 'editorials', 'forums', 'random', 'about', 'rules'}
         
         meme_links = soup.find_all('a', href=True)
@@ -117,12 +116,10 @@ def fetch_kym_trending(limit):
                 break
                 
             href = a_tag['href']
-            # 只处理 /memes/ 开头的链接
             if not href.startswith('/memes/'):
                 continue
                 
             parts = href.strip('/').split('/')
-            # 必须恰好是两部分，比如 ['memes', 'deadpool']
             if len(parts) != 2:
                 continue
                 
@@ -155,10 +152,9 @@ def fetch_kym_trending(limit):
         return []
 
 # ==========================================
-# 3. AI 业务处理层 (防限流版)
+# 3. AI 业务处理层 (加入动态指数退避算法)
 # ==========================================
 def analyze_post_with_ai(title, source_name, body, img_url):
-    """调用大模型，带有强力重试抗压机制"""
     if not AI_API_KEY:
          return "解析: 未配置 AI 密钥\n创意: 无法生成"
 
@@ -194,25 +190,27 @@ def analyze_post_with_ai(title, source_name, body, img_url):
         "max_tokens": 150
     }
 
-    # 允许 3 次重试，每次失败强制休眠 3 秒
-    for attempt in range(3):
+    # 🚀 绝杀技：指数退避重试机制 (Exponential Backoff)
+    for attempt in range(4): # 增加到 4 次重试机会
         try:
             response = requests.post(AI_API_URL, headers=headers, json=payload, timeout=20)
-            if response.status_code == 429: # 捕捉限流状态码
-                time.sleep(3)
+            if response.status_code == 429: 
+                wait_time = (attempt + 1) * 5 # 动态休眠：5秒, 10秒, 15秒
+                print(f"     [API 限流] 触发 429 报错，等待 {wait_time} 秒后重试...")
+                time.sleep(wait_time)
                 continue
             response.raise_for_status() 
             return response.json()['choices'][0]['message']['content'].strip()
         except Exception as e:
-            print(f"     [AI 警告] 解析《{title[:10]}...》超时 (尝试 {attempt+1}/3)... 正在重试")
-            time.sleep(3) 
+            wait_time = (attempt + 1) * 5
+            print(f"     [AI 报错] 解析《{title[:10]}...》超时/报错 (尝试 {attempt+1}/4)，休眠 {wait_time} 秒: {e}")
+            time.sleep(wait_time) 
             
-    return "解析: AI 接口严格限流，解析失败\n创意: 请结合原文直达链接自行查看"
+    return "解析: AI 接口严格限流，多次重试后仍失败\n创意: 请结合原文直达链接自行查看"
 
 def batch_analyze_posts(posts, source_name):
-    """降级为单线程顺序处理，彻底根治 API 并发限制导致的封杀"""
     if not posts: return []
-    print(f"  -> ⚡ 启动顺序解析 {source_name} 的 {len(posts)} 条数据 (已开启 API 防封禁限速保护)...")
+    print(f"  -> ⚡ 启动顺序解析 {source_name} 的 {len(posts)} 条数据 (已开启深度防封禁保护)...")
     
     valid_posts = []
     
@@ -226,8 +224,8 @@ def batch_analyze_posts(posts, source_name):
         post['ai_analysis'] = ai_result
         valid_posts.append(post)
         
-        # 核心防封禁锁：每次请求完毕强制休眠 2.5 秒，温柔对待中转站接口
-        time.sleep(2.5) 
+        # 🚀 彻底降速：每个请求之间强制休息 5 秒
+        time.sleep(5) 
             
     return valid_posts
 
